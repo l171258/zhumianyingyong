@@ -1,39 +1,173 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import "./App.css";
 import Header from "./components/Header.jsx";
 import CandidateVotes from "./components/CandidateVotes.jsx";
 import VoteSection from "./components/VoteSection.jsx";
+import { ethers } from "ethers";
+import { CONTRACT_ADDRESS, CONTRACT_ABI } from "./contracts/config.js";
 
 function App() {
+  const [loading, setLoading] = useState(true);
   const [account, setAccount] = useState(null);
-  const [loading] = useState(false);
   const [hasVoted, setHasVoted] = useState(false);
   const [selectedId, setSelectedId] = useState("");
+  const [candidates, setCandidates] = useState([]);
 
-  const [candidates, setCandidates] = useState([
-    { id: 1, name: "Alice", voteCount: 12 },
-    { id: 2, name: "Bob", voteCount: 8 },
-    { id: 3, name: "Charlie", voteCount: 5 },
-  ]);
-
-  // 模拟连接/断开钱包
-  const handleConnectWallet = () => {
-    if (account) {
-      setAccount(null);
-      setSelectedId("");
-    } else {
-      setAccount("0x1234567890abcdef123456789abcdef12345678");
+  // 从合约中获取候选人真实数据
+  const fetchContractData = async (currentAccount) => {
+    if (!window.ethereum) {
+      setLoading(false);
+      return;
+    }
+    try {
+      setLoading(true);
+      const provider = new ethers.BrowserProvider(window.ethereum);
+      const contract = new ethers.Contract(
+        CONTRACT_ADDRESS,
+        CONTRACT_ABI,
+        provider
+      );
+      const rawCandidates = await contract.getCandidates();
+      const formattedCandidates = rawCandidates.map((c) => ({
+        id: Number(c.id),
+        name: c.name,
+        voteCount: Number(c.voteCount),
+      }));
+      setCandidates(formattedCandidates);
+      if (currentAccount) {
+        const voted = await contract.checkIfVoted(currentAccount);
+        setHasVoted(voted);
+      } else {
+        setHasVoted(false);
+      }
+    } catch (error) {
+      console.log(error, "其他错误++++++++++++555555555");
+    } finally {
+      setLoading(false);
     }
   };
 
-  const handleVote = () => {
-    if (selectedId === "") return;
-    setCandidates((prev) =>
-      prev.map((c) =>
-        c.id === Number(selectedId) ? { ...c, voteCount: c.voteCount + 1 } : c
-      )
-    );
-    setHasVoted(true);
+  // 监听account状态变动，切换账号自动拉取链上数据
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    fetchContractData(account);
+  }, [account]);
+
+  // 页面初始化，监听metamask账户/网络切换
+  useEffect(() => {
+    if (!window.ethereum) return;
+    // 1.自动检查是否授权过钱包
+    window.ethereum
+      .request({ method: "eth_accounts" })
+      .then((accounts) => {
+        if (accounts.length > 0) {
+          setAccount(accounts[0]);
+        }
+      })
+      .catch((error) => {
+        console.error(error, "其他错误11111111111111111111");
+      });
+
+    // 2.监听账户切换
+    const handleAccountsChanged = (accounts) => {
+      if (accounts.length > 0) {
+        setAccount(accounts[0]);
+      } else {
+        setAccount(null);
+        setSelectedId("");
+      }
+    };
+
+    // 3.监听网络切换，刷新页面
+    const handleChainChanged = () => {
+      window.location.reload();
+    };
+
+    window.ethereum.on("accountsChanged", handleAccountsChanged);
+    window.ethereum.on("chainChanged", handleChainChanged);
+
+    // 4.组件卸载，移除事件监听，防止内存泄漏
+    return () => {
+      if (window.ethereum?.removeListener) {
+        window.ethereum.removeListener(
+          "accountsChanged",
+          handleAccountsChanged
+        );
+      }
+      window.ethereum.removeListener("chainChanged", handleChainChanged);
+    };
+  }, []);
+
+  // 连接/断开钱包
+  const handleConnectWallet = async () => {
+    // 1. 检查浏览器是否已经安装了metamask钱包
+    if (!window.ethereum) {
+      alert("请安装Metamask钱包");
+      return;
+    }
+    // 2.如果当前已处于连接状态，点击执行前端层面的断开重置
+    if (account) {
+      setAccount(null);
+      setSelectedId("");
+      return;
+    }
+    // 3.唤起metamask弹窗连接请求
+    try {
+      const accounts = await window.ethereum.request({
+        method: "eth_requestAccounts",
+      });
+      if (accounts.length > 0) {
+        setAccount(accounts[0]);
+      }
+    } catch (error) {
+      if (error.code === 4001) {
+        console.warn("用户拒绝了连接请求");
+      } else {
+        console.log(error, "其他错误");
+      }
+    }
+  };
+
+  // 投票函数，调用合约上链
+  const handleVote = async () => {
+    // 1. 前置安全校验
+    if (selectedId === "" || !account || !window.ethereum) {
+      return;
+    }
+    try {
+      setLoading(true);
+      // 2. 创建provider和签名者
+      const provider = new ethers.BrowserProvider(window.ethereum);
+      const signer = await provider.getSigner();
+      // 3. 创建带签名的合约实例
+      const contract = new ethers.Contract(
+        CONTRACT_ADDRESS,
+        CONTRACT_ABI,
+        signer
+      );
+      // 4. 调用合约vote方法，转数字传给合约
+      const tx = await contract.vote(Number(selectedId));
+      console.log(tx.hash, "++++++++++++++");
+      // 5. 等待交易打包确认
+      await tx.wait();
+      console.log("交易打包成功");
+      // 6. 重新拉取链上最新数据
+      await fetchContractData(account);
+      setSelectedId("");
+      alert("投票成功-*-*-*-*-*-*-");
+    } catch (error) {
+      console.log(error, "++++++++++++++++++++错误");
+      if (error.code === 4001 || error.code === "ACTION_REJECTED") {
+        console.warn("用户拒绝了投票请求");
+      } else if (error.reason) {
+        alert(`投票失败:${error.reason}`);
+      } else {
+        console.log(error, "投票失败++++");
+        alert("投票失败请看控制台信息");
+      }
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
